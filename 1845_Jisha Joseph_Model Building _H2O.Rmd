@@ -1,0 +1,307 @@
+---
+title: 'PhD: CSE9099c - Machine Learning Algorithms with Weather Data-H2O'
+author: "Jisha Joseph 1845"
+date: "July-27-2018"
+output:
+  pdf_document:
+    toc: yes
+  html_document:
+    toc: yes
+    toc_float: yes
+---
+# Set up the environement
+```{r}
+rm(list=ls(all = T))
+setwd("C:/Users/Hp/Desktop/INSOFE/Jisha Joseph_PhD") 
+```
+# List & Load all required libraries here
+```{r message = FALSE}
+library(DMwR)
+library(caret)
+library(ROCR)
+library(corrplot)
+library(class)
+library(ada)
+library(xgboost)
+library(randomForest)
+library(rpart)
+library(C50)
+library(e1071)
+library(tidyverse)
+library(lubridate)
+library(tidyr)
+library(h2o)
+library(ggplot2)
+library(MLmetrics)
+```
+##   #######################End of Weather Data Processing#################
+## Full Train Data Pre-processing
+## Data exploration;
+## Visualisations of Numeric attributes in Train Data
+```{r}
+library(purrr)
+trallsthpd_hrly %>%
+ keep(is.numeric) %>% 
+ gather() %>% 
+ ggplot(aes(value)) +
+ facet_wrap(~ key, scales = "free") +
+ geom_histogram()
+
+```
+## Check attributes of near zero variance in Train data
+```{r}
+#tr_bkp<-train_data
+#ts_bkp<-test_data
+train_data<-trallsthpd_hrly
+test_data<-tsallsthpd_hrly
+nearZeroVar(train_data, freqCut = 95/5, uniqueCut = 10, saveMetrics = FALSE,names = TRUE, foreach = FALSE, allowParallel = TRUE)
+```
+### Keeping HourlyPrecip and WindGustValue for testing purpose
+```{r}
+#delete <- c("HourlyPrecip")
+#train_data<-train_data[,!(colnames(train_data) %in% delete),drop=FALSE]
+#test_data<-test_data[,!(colnames(test_data) %in% delete),drop=FALSE]
+str(train_data)
+```
+## Split Categorical and Numerical Attributes
+```{r}
+cat_attr<-c("FlightNumber","FlightDelayStatus","ExpectedArrival","ExpectedDep")
+num_attr<-setdiff(colnames(train_data),cat_attr)
+num_attr
+```
+## Check Correlation Plot
+```{r}
+num_attr_df<-data.frame(train_data[,num_attr])
+cor_num_attr_df<-cor(num_attr_df)
+#corrplot(cor_num_attr_df, method = "square")
+corrplot(cor_num_attr_df, method = "number")
+```
+
+* Remove GroundHeight as it is highly negatively correlated to StationPressure(-0.96)
+```{r}
+
+delete <- c("GroundHeight")
+train_data<-train_data[,!(colnames(train_data) %in% delete),drop=FALSE]
+test_data<-test_data[,!(colnames(test_data) %in% delete),drop=FALSE]
+
+colnames(train_data)
+```
+## Backups of Data and Removal of attributes as needed
+```{r}
+## Backups of main data
+trn_data<-train_data
+tst_data<-test_data
+
+#train_data<-trn_data
+#test_data<-tst_data
+
+str(FlightNumber)
+train_data$FlightDelayStatus<-as.factor(as.character(train_data$FlightDelayStatus))
+
+FlightNumber<-as.data.frame(test_data_orig$FlightNumber)
+colnames(FlightNumber)[1]<-"FlightDelayStatus"
+test_data_trial<-test_data
+test_data<-test_data[match(FlightNumber$FlightDelayStatus,test_data$FlightNumber),]
+train_data$FlightNumber<-NULL
+test_data$FlightNumber<-NULL
+
+colnames(test_data)
+```
+## Bivariate Analysis
+* DBT and RelativeHumidityPercent
+```{r}
+ggplot(train_data,aes(x=DBT,
+           y=RelativeHumidityPercent)) + 
+geom_point(size=2)+ggtitle("DBT VS RelativeHumidityPercent")
+```
+# ############################### Basic Model Building #############################
+## Check for the proportion of Target distribution of classes
+```{r}
+table(train_data$FlightDelayStatus)
+str(train_data)
+```
+* Confirm equal distribution of Status in train & validation.
+```{r}
+prop.table(table(train_data$FlightDelayStatus))
+
+train_data$ExpectedArrival=as.numeric(train_data$ExpectedArrival)
+test_data$ExpectedArrival=as.numeric(test_data$ExpectedArrival)
+train_data$ExpectedDep=as.numeric(train_data$ExpectedDep)
+test_data$ExpectedDep=as.numeric(test_data$ExpectedDep)
+``` 
+
+# ############################### Basic Model Building #############################
+## Train-Validation split
+```{r}
+train_data_df<-train_data
+#train_data<-train_data_df
+set.seed(123)
+train_rows <- createDataPartition(train_data$FlightDelayStatus, p = 0.80, list = F )
+pre_train <- train_data[train_rows, ]
+pre_val <- train_data[-train_rows, ]
+
+validation_data <- train_data[-train_rows, ]
+train_data<-train_data[train_rows, ]
+
+```
+
+## Check for the proportion of Target distribution of classes
+```{r}
+table(train_data$FlightDelayStatus)
+table(validation_data$FlightDelayStatus)
+```
+
+## H2O
+## H2O - Random Forest
+```{r}
+## Reordering Train and Validation data
+#train_data<-train_data[c(1:4,6:13,5)]
+#validation_data<-validation_data[c(1:4,6:13,5)]
+
+localH2O <- h2o.init(nthreads = -1)
+
+#data to h2o cluster
+train_h2o <- as.h2o(train_data)
+val_h2o<-as.h2o(validation_data)
+test_h2o <- as.h2o(test_data)
+
+#check column index number
+colnames(train_h2o) 
+y_dep <- 13
+
+#Independent variables 
+x_indep <- c(1:12)
+
+
+#sample_factors <- c(.25,5.)
+
+H2O_RF_Model = h2o.randomForest(y = y_dep, x = x_indep,training_frame = train_h2o,ntrees = 75,max_depth = 100,min_rows = 15,seed = 12345,mtries =7,balance_classes=TRUE)
+
+#hyper_params <- list(class_sampling_factors = list(c(.25, 0.5),c(2.,3.)))
+
+#H2O_RF_Model = h2o.randomForest(y = y_dep, x = x_indep,training_frame = train_h2o,nfolds = 9,ntrees = 75,max_depth = 40,min_rows = 30,seed = 12345,mtries =5,balance_classes=TRUE,calibrate_model = TRUE,calibration_frame = val_h2o,class_sampling_factors = sample_factors,binomial_double_trees=TRUE)
+#H2O_RF_Model = h2o.grid(y = y_dep, x = x_indep,training_frame = train_h2o,nfolds = 7,ntrees = 85,max_depth = 7,min_rows = 20,seed = 12345,mtries =7,nfolds = 9,balance_classes=TRUE,calibrate_model = TRUE,grid_id = "covtype_grid",algorithm = "drf",calibration_frame = val_h2o,hyper_params = hyper_params,search_criteria = list(strategy = "Cartesian"))
+
+# Sort the grid models by logloss
+#sortedGrid <- h2o.getGrid("covtype_grid", sort_by = "logloss", decreasing = FALSE)
+#sortedGrid
+#mtries = 4 , Let it use the default sqrt(p) for classification
+
+```
+## Check the performance of model
+```{r}
+h2o.performance(H2O_RF_Model)
+```
+## Check for important variables
+```{r}
+h2o.varimp(H2O_RF_Model)
+```
+## Plot the Variable Importance for TOP 10 features
+```{r}
+h2o.varimp_plot(H2O_RF_Model)
+```
+## Make prediction on train data using the model
+```{r}
+Pred_Train_H2O_RF = as.data.frame(h2o.predict(H2O_RF_Model , train_h2o))
+```
+## Create a confusion Matrix for Train
+```{r}
+#Pred_Train_RF <- ifelse(Pred_Train_H2O_RF$No < 0.5, "Yes","No")
+Pred_Train_RF<-Pred_Train_H2O_RF$predict
+conf_matrix <- table(train_data$FlightDelayStatus, Pred_Train_RF)
+print(conf_matrix)
+```
+## Make prediction on Validation data using the model
+```{r}
+Pred_Validate_H2O_RF = as.data.frame(h2o.predict(H2O_RF_Model , val_h2o))
+```
+## Create a confusion Matrix for Validation -->F1 Score-->86.20
+```{r}
+#Pred_val_RF <- ifelse(Pred_Validate_H2O_RF$No <= 0.5, "Yes","No")
+Pred_val_RF <- Pred_Validate_H2O_RF$predict
+conf_matrix <- table(validation_data$FlightDelayStatus, Pred_val_RF)
+print(conf_matrix)
+
+F1_Score(validation_data$FlightDelayStatus, Pred_val_RF)
+```
+## Make prediction on Validation data using the model
+```{r}
+Pred_Test_H2O_RF = as.data.frame(h2o.predict(H2O_RF_Model , test_h2o))
+```
+## Prediction F1 Score-->28.13
+```{r}
+#FlightDelayStatus <- ifelse(Pred_Test_H2O_RF$No <= 0.6, "Yes","No")
+FlightDelayStatus<-Pred_Test_H2O_RF$predict
+FlightNumber<-as.data.frame(FlightNumber)
+preds_h2o_rf<-cbind(FlightNumber,FlightDelayStatus)
+write.csv(preds_h2o_rf,"submission_h2Orf.csv",row.names = F)
+```
+## H2O
+## H2O - Gradient Boosting
+```{r}
+## Reordering Train and Validation data
+#train_data<-train_data[c(1:4,6:13,5)]
+#validation_data<-validation_data[c(1:4,6:13,5)]
+
+localH2O <- h2o.init(nthreads = -1)
+
+#data to h2o cluster
+train_h2o <- as.h2o(train_data)
+val_h2o<-as.h2o(validation_data)
+test_h2o <- as.h2o(test_data)
+
+#check column index number
+colnames(train_h2o) 
+y_dep <- 13
+
+#Independent variables    
+x_indep <- c(1:12)
+
+H2O_gbm_Model = h2o.gbm(y = y_dep, x = x_indep,training_frame = train_h2o,ntrees = 500,nfolds = 7,max_depth = 215,min_rows = 5,seed = 12345,learn_rate = 0.05,learn_rate_annealing=0.90,distribution ="bernoulli",sample_rate = .05,col_sample_rate=0.3,balance_classes=TRUE)
+
+```
+## Check the performance of model
+```{r}
+h2o.performance(H2O_gbm_Model)
+```
+## Check for important variables
+```{r}
+h2o.varimp(H2O_gbm_Model)
+```
+## Plot the Variable Importance for TOP 10 features
+```{r}
+h2o.varimp_plot(H2O_gbm_Model)
+```
+## Make prediction on train data using the model
+```{r}
+Pred_Train_H2O_gbm = as.data.frame(h2o.predict(H2O_gbm_Model , train_h2o))
+```
+## Create a confusion Matrix for Train
+```{r}
+Pred_Train_gbm<-Pred_Train_H2O_gbm$predict
+conf_matrix <- table(train_data$FlightDelayStatus, Pred_Train_gbm)
+print(conf_matrix)
+```
+## Make prediction on Validation data using the model
+```{r}
+Pred_Validate_H2O_gbm = as.data.frame(h2o.predict(H2O_gbm_Model , val_h2o))
+```
+## Create a confusion Matrix for Validation -->F1 Score-->80.73
+```{r}
+Pred_val_gbm <- Pred_Validate_H2O_gbm$predict
+conf_matrix <- table(validation_data$FlightDelayStatus, Pred_val_gbm)
+print(conf_matrix)
+
+F1_Score(validation_data$FlightDelayStatus, Pred_val_gbm)
+```
+## Make prediction on Validation data using the model
+```{r}
+Pred_Test_H2O_gbm = as.data.frame(h2o.predict(H2O_gbm_Model , test_h2o))
+```
+## Prediction F1 Score-->28.13
+```{r}
+FlightDelayStatus<-Pred_Test_H2O_gbm$predict
+FlightNumber<-as.data.frame(FlightNumber)
+preds_h2o_gbm<-cbind(FlightNumber,FlightDelayStatus)
+write.csv(preds_h2o_gbm,"submission_h2Ogbm.csv",row.names = F)
+```
