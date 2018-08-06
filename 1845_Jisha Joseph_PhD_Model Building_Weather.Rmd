@@ -1,0 +1,477 @@
+---
+title: 'PhD: CSE9099c - Machine Learning Algorithms with Weather Data'
+author: "Jisha Joseph 1845"
+date: "July-27-2018"
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+  pdf_document: 
+    toc: yes
+---
+# Set up the environement
+```{r}
+rm(list=ls(all = T))
+setwd("C:/Users/Hp/Desktop/INSOFE/Jisha Joseph_PhD")
+```
+# List & Load all required libraries here
+```{r message = FALSE}
+library(DMwR)
+library(caret)
+library(ROCR)
+library(corrplot)
+library(class)
+library(ada)
+library(xgboost)
+library(randomForest)
+library(C50)
+library(e1071)
+library(tidyverse)
+library(lubridate)
+library(tidyr)
+library(ggplot2)
+library(ROSE)
+```
+## Full Train Data with Weather Data Pre-processing
+## Data exploration;
+## Visualisations of Numeric attributes in Train Data
+```{r}
+library(purrr)
+trallsthpd_hrly %>%
+ keep(is.numeric) %>% 
+ gather() %>% 
+ ggplot(aes(value)) +
+ facet_wrap(~ key, scales = "free") +
+ geom_histogram()
+
+```
+## Check attributes of near zero variance in Train data
+```{r}
+#tr_bkp<-train_data
+#ts_bkp<-test_data
+train_data<-trallsthpd_hrly
+test_data<-tsallsthpd_hrly
+nearZeroVar(train_data, freqCut = 95/5, uniqueCut = 10, saveMetrics = FALSE,names = TRUE, foreach = FALSE, allowParallel = TRUE)
+```
+#Not removing HourlyPrecip for testing purpose
+```{r}
+#delete <- c("HourlyPrecip")
+#train_data<-train_data[,!(colnames(train_data) %in% delete),drop=FALSE]
+#test_data<-test_data[,!(colnames(test_data) %in% delete),drop=FALSE]
+str(train_data)
+```
+## Split Categorical and Numerical Attributes
+```{r}
+cat_attr<-c("FlightNumber","FlightDelayStatus","ExpectedArrival","ExpectedDep")
+num_attr<-setdiff(colnames(train_data),cat_attr)
+num_attr
+```
+## Check Correlation Plot
+```{r}
+num_attr_df<-data.frame(train_data[,num_attr])
+cor_num_attr_df<-cor(num_attr_df)
+#corrplot(cor_num_attr_df, method = "square")
+corrplot(cor_num_attr_df, method = "number")
+```
+## Chi-Square Test to identify correlated Categorical Attributes in Train data
+```{r}
+chisq.test(train_data$FlightDelayStatus, train_data$ExpectedArrival, correct=FALSE)
+```
+* Remove GroundHeight as it is highly negatively correlated to StationPressure(-0.96)
+```{r}
+
+delete <- c("GroundHeight")
+train_data<-train_data[,!(colnames(train_data) %in% delete),drop=FALSE]
+test_data<-test_data[,!(colnames(test_data) %in% delete),drop=FALSE]
+
+colnames(train_data)
+```
+## Backups of Data and Removal of attributes as needed
+```{r}
+## Backups of main data
+trn_data<-train_data
+tst_data<-test_data
+
+#train_data<-trn_data
+#test_data<-tst_data
+
+FlightNumber<-tst_data$FlightNumber
+train_data$FlightNumber<-NULL
+test_data$FlightNumber<-NULL
+
+colnames(test_data)
+```
+## Bivariate Analysis
+* DBT and RelativeHumidityPercent
+```{r}
+ggplot(train_data,aes(x=DBT,
+           y=RelativeHumidityPercent)) + 
+geom_point(size=2)+ggtitle("DBT VS RelativeHumidityPercent")
+```
+# ############################### Basic Model Building #############################
+## Check for the proportion of Target distribution of classes
+```{r}
+table(train_data$FlightDelayStatus)
+str(train_data)
+```
+* Confirm equal distribution of Status in train & validation.Imbalanced Data;Have to balance in further processing: Imbalanced Dataset
+```{r}
+prop.table(table(train_data$FlightDelayStatus))
+``` 
+## Make equal distribution of Target using ROSE
+```{r}
+## Converting to numeric as ROSE handles only numeric and categorical
+train_data$ExpectedArrival<-as.numeric(train_data$ExpectedArrival)
+test_data$ExpectedArrival<-as.numeric(test_data$ExpectedArrival)
+train_data$ExpectedDep<-as.numeric(train_data$ExpectedDep)
+test_data$ExpectedDep<-as.numeric(test_data$ExpectedDep)
+
+## Converting Target to numeric as ROSE
+train_data$FlightDelayStatus<-as.character(as.factor(train_data$FlightDelayStatus))
+train_data$FlightDelayStatus <- ifelse(train_data$FlightDelayStatus == 'No', 1,0)
+
+train_data_rose <- ROSE(FlightDelayStatus ~ ., data = train_data, seed = 1)$data
+```
+## Check the dataset balance
+```{r}
+train_data<-train_data_rose
+prop.table(table(train_data$FlightDelayStatus))
+``` 
+## Train-Validation split
+```{r}
+set.seed(715)
+trn_bef_splt<-train_data
+
+#train_data<-trn_bef_splt
+
+train_rows <- createDataPartition(train_data$FlightDelayStatus, p = 0.90, list = F )
+pre_train <- train_data[train_rows, ]
+pre_val <- train_data[-train_rows, ]
+
+validation_data <- train_data[-train_rows, ]
+train_data<-train_data[train_rows, ]
+
+```
+## Standardize all the real valued variables in the dataset using only the train data
+```{r}
+std_method <- preProcess(pre_train[, !(names(pre_train) %in% c("FlightDelayStatus"))], method = c("center", "scale"))
+
+train_data_std <- predict(std_method, pre_train)
+validation_data_std <- predict(std_method, pre_val)
+test_data_std <- predict(std_method, test_data)
+
+```
+## Balanced Data-Standardised
+## ########################## Basic Model1 ##########################################
+# Build Logistic Regression model
+```{r}
+##Basic Model Buidling
+log_model<-glm(FlightDelayStatus~.,train_data_std,family = binomial)
+summary(log_model)
+```
+## Model plot
+```{r}
+plot(log_model)
+```
+## Build ROC Plot
+```{r}
+prob_train<-predict(log_model,type="response")
+pred<-prediction(prob_train,train_data_std$FlightDelayStatus)
+perf<-performance(pred,measure = "tpr",x.measure = "fpr")
+plot(perf,col=rainbow(10),colorize=T, print.cutoffs.at=seq(0,1,0.1))
+perf_auc <- performance(pred, measure="auc")
+```
+## Access the auc score from the performance object: AUC:77.66
+```{r}
+auc <- perf_auc@y.values[[1]]
+print(auc)
+```
+# Validation Data Prediction; Threshold 0.5
+```{r}
+prob_val <- predict(log_model, validation_data_std, type = "response")
+#prob_val
+#preds_val <- ifelse(prob_val > 0.5, "No","Yes")
+#preds_val<-as.factor(as.character(preds_val))
+preds_val <- ifelse(prob_val > 0.5, 1,0)
+
+#preds_val<-as.numeric(preds_val)
+validation_data_std$FlightDelayStatus<-as.numeric(validation_data_std$FlightDelayStatus)
+
+#validation_data_std$FlightDelayStatus<-as.factor(as.character(validation_data_std$Fl#ightDelayStatus))
+#validation_data$FlightDelayStatus<-ifelse(validation_data$FlightDelayStatus == 1, #"No","Yes")
+#preds_val
+```
+## Create a confusion Matrix
+```{r}
+conf_matrix <- table(validation_data_std$FlightDelayStatus, preds_val)
+print(conf_matrix)
+```
+## Validation Accuracy-->70.8%
+## Validation F1 Score-->71.33%
+```{r}
+str(validation_data_std)
+
+F1_Score(y_true =validation_data_std$FlightDelayStatus,y_pred = preds_val)
+Accuracy(y_true =validation_data_std$FlightDelayStatus,y_pred = preds_val)
+```
+## Test Data Prediction F1 Score-->26.85%
+```{r}
+prob_test <- predict(log_model, test_data_std, type = "response")
+FlightDelayStatus <- ifelse(prob_test > 0.53, "No", "Yes") #-->chr
+FlightNumber<-as.data.frame(FlightNumber)
+preds_aic<-cbind(FlightNumber,FlightDelayStatus)
+write.csv(preds_aic,"submission_log.csv",row.names = F)
+```
+# ########################### Basic Model2 ##########################################
+# Build C5.0 Decision Trees
+```{r}
+#class(train_data$ExpectedArrival)-->POSIXt
+#trndbfex<-train_data
+#tstbfex<-test_data
+#valbfex<-validation_data
+str(train_data)
+#train_data$ExpectedArrival=as.numeric(train_data$ExpectedArrival)
+#validation_data$ExpectedArrival=as.numeric(validation_data$ExpectedArrival)
+#test_data$ExpectedArrival=as.numeric(test_data$ExpectedArrival)
+#validation_data_std$FlightDelayStatus<-as.factor(as.character(validation_data_std$Fl#ightDelayStatus))
+
+train_data$FlightDelayStatus<-as.factor(as.character(train_data$FlightDelayStatus))
+c5_tree <- C5.0(FlightDelayStatus ~ ., data = train_data)
+summary(c5_tree)
+plot(c5_tree)
+```
+##Prediction on Validation data
+```{r}
+preds_val<-predict(c5_tree,validation_data)
+confusionMatrix(preds_val,validation_data$FlightDelayStatus)
+```
+## F1 score on Validation data-->76.14%
+## Accuracy on Validation Data-->75.65%
+```{r}
+F1_Score(y_true =validation_data$FlightDelayStatus,y_pred = preds_val)
+Accuracy(y_true =validation_data$FlightDelayStatus,y_pred = preds_val)
+```
+## Test Data Prediction F1 Score-->24.96%
+```{r}
+pred_test <- predict(c5_tree, test_data, type = "class")
+FlightDelayStatus<-as.character(pred_test) 
+preds_c50<-cbind(FlightNumber,FlightDelayStatus)
+write.csv(preds_c50,"submission_c50.csv",row.names = F)
+```
+# ########################### Basic Model3 ##########################################
+# Build Random Forest
+```{r}
+train_data$FlightDelayStatus<-as.factor(as.character(train_data$FlightDelayStatus))
+model_rf = randomForest(FlightDelayStatus ~ ., data=train_data, 
+                     keep.forest=TRUE, ntree=250)
+print(model_rf)
+```
+## Variable Importance
+```{r}
+#model_rf$importance  
+round(importance(model_rf), 1)
+```
+## Store the important Attributes
+```{r}
+varImpPlot(model_rf) 
+```
+## Predict on Train data
+```{r}
+pred_train = predict(model_rf, 
+                     train_data[,setdiff(names(train_data), "FlightDelayStatus")],
+                     type="response", 
+                     norm.votes=TRUE)
+confusionMatrix(pred_train,train_data$FlightDelayStatus) 
+```
+## Prediction on Validation data
+```{r}
+pred_val = predict(model_rf, 
+                  validation_data[,setdiff(names(validation_data),"FlightDelayStatus")],
+                     type="response", 
+                     norm.votes=TRUE)
+confusionMatrix(pred_val,validation_data$FlightDelayStatus) 
+```
+## F1 score on Validation data-->78.43%  
+## Accuracy on Validation Data-->77.60%
+```{r}
+F1_Score(y_true =validation_data$FlightDelayStatus,y_pred = pred_val)
+Accuracy(y_true =validation_data$FlightDelayStatus,y_pred = pred_val)
+```
+## Test Data Prediction F1 Score-->27.01%
+```{r}
+pred_test = predict(model_rf, 
+                  test_data[,setdiff(names(test_data),"FlightDelayStatus")],
+                     type="response", 
+                     norm.votes=TRUE)
+FlightDelayStatus<-as.character(pred_test)
+preds_rf<-cbind(FlightNumber,FlightDelayStatus)
+write.csv(preds_rf,"submission_RF.csv",row.names = F) 
+#pred_test 
+```
+# ########################### Tuning ##########################################
+# Build Random Forest
+```{r}
+## Reordering Train and test data
+#train_data<-train_data[c(1:4,6:13,5)]
+#validation_data<-validation_data[c(1:4,6:13,5)]
+#train_data$FlightDelayStatus<-as.factor(as.character(train_data$FlightDelayStatus))
+mtry <- tuneRF(train_data[, 1:12], train_data$FlightDelayStatus, ntreeTry = 100, stepFactor = 1.5, improve = 0.01, trace = F, plot = T)
+best.m <- mtry[mtry[, 2] == min(mtry[, 2]), 1]
+print(mtry)
+print(best.m)
+```
+
+##Build Model with best mtry again 
+```{r}
+set.seed(1234)
+tune_rf <- randomForest(FlightDelayStatus~.,data=train_data, mtry=best.m,replace=TRUE, importance=TRUE,ntree=100)
+print(tune_rf)
+```
+## Variable Importance
+```{r}
+#tune_rf$importance  
+round(importance(tune_rf), 1)
+```
+## Store the important Attributes
+```{r}
+varImpPlot(tune_rf) 
+```
+## Variable Importance
+```{r}
+rf_importance <- importance(tune_rf)
+rf_importance <- data.frame("Attributes" = row.names(rf_importance), "Importance" = rf_importance[, 4])
+rf_importance <- arrange(rf_importance, desc(Importance))
+```
+## Select the hyperparameters-ntree and mtry for Random Forest
+```{r}
+trees = c(75,100,150,175,200,250)
+#variables = c(3,4,7,10)
+
+for(i in 1:length(trees))
+{
+  ntree = trees[i]
+  for(n in 1:10)
+  {
+   top_n_attr <- as.character(rf_importance[1:n, 1])
+   rf_tuned_mod <-randomForest(x = train_data[, top_n_attr], y = train_data$FlightDelayStatus, ntree=ntree, mtry=n)
+   pred_val = predict(rf_tuned_mod, 
+                  validation_data[,setdiff(names(validation_data),"FlightDelayStatus")],
+                     type="response", 
+                     norm.votes=TRUE)
+confusionMatrix(pred_val,validation_data$FlightDelayStatus) 
+  f<-F1_Score(y_true =validation_data$FlightDelayStatus,y_pred = pred_val)
+  print(paste0("For tree ", ntree, "For mtry", n,"Attributes F1 Scores is ",f))
+acc<-Accuracy(y_true =validation_data$FlightDelayStatus,y_pred = pred_val)
+print(paste0("For tree ", ntree, "For mtry", n," Attributes accuracy is ",acc))
+  }
+}
+```
+## Tuned RF model
+* Top 9 important attributes gave best F1 score, so lets build tuned RF model with top 9 attributes
+
+```{r}
+rf_imp_attr <- as.character(rf_importance[1:9, 1])
+rf_tuned_mod <- randomForest(x = train_data[, rf_imp_attr], y = train_data$FlightDelayStatus, ntree = 200, mtry = 9)
+```
+## Predict on Train data
+```{r}
+pred_train = predict(rf_tuned_mod, 
+                     train_data[,setdiff(names(train_data), "FlightDelayStatus")],
+                     type="response", 
+                     norm.votes=TRUE)
+confusionMatrix(pred_train,train_data$FlightDelayStatus) 
+
+```
+## Prediction on Validation data
+```{r}
+pred_val = predict(rf_tuned_mod, 
+                  validation_data[,setdiff(names(validation_data),"FlightDelayStatus")],
+                     type="response", 
+                     norm.votes=TRUE)
+confusionMatrix(pred_val,validation_data$FlightDelayStatus) 
+```
+## F1 score on Validation data-->77.43%  
+## Accuracy on Validation Data-->77.60%
+```{r}
+F1_Score(y_true =validation_data$FlightDelayStatus,y_pred = pred_val)
+Accuracy(y_true =validation_data$FlightDelayStatus,y_pred = pred_val)
+```
+## Test Data Prediction F1 Score-->22.25%
+```{r}
+pred_test = predict(rf_tuned_mod, 
+                  test_data[,setdiff(names(test_data),"FlightDelayStatus")],
+                     type="response", 
+                     norm.votes=TRUE)
+FlightDelayStatus<-as.character(pred_test)
+preds_rf<-cbind(FlightNumber,FlightDelayStatus)
+write.csv(preds_rf,"submission_RF.csv",row.names = F) 
+#pred_test 
+```
+# ########################### Basic Model4 ##########################################
+# Build Naive Bayes
+```{r}
+train_data$FlightDelayStatus=as.factor(as.character(train_data$FlightDelayStatus))
+validation_data$FlightDelayStatus=as.factor(as.character(validation_data$FlightDelayStatus))
+
+model_nvb <- naiveBayes(FlightDelayStatus~.,data = train_data)
+```
+##Prediction on Validation data
+```{r}
+##Expects ExpectedArrival to be numeric
+preds_val<-predict(model_nvb,validation_data)
+confusionMatrix(preds_val,validation_data$FlightDelayStatus)
+```
+## F1 score on Validation data-->85.5%
+## Accuracy on Validation Data-->77.4%
+```{r}
+F1_Score(y_true =validation_data$FlightDelayStatus,y_pred = preds_val)
+Accuracy(y_true =validation_data$FlightDelayStatus,y_pred = preds_val)
+```
+## Test Data Prediction F1 Score-->27.08%
+```{r}
+pred_test <- predict(model_nvb, test_data)
+FlightDelayStatus<-as.character(pred_test) 
+preds_nvb<-cbind(FlightNumber,FlightDelayStatus)
+write.csv(preds_nvb,"submission_nvb.csv",row.names = F)
+```
+# ########################### Basic Model5 ##########################################
+# Build Adaboost model
+```{r}
+## Reordering Train and test data
+#train_data<-train_data[c(1:3,5:15,4)]
+#validation_data<-validation_data[c(1:3,5:15,4)]
+
+ada_basic_model <- ada(x = train_data[, 1:14], y = train_data$FlightDelayStatus, iter = 175, loss = "exponential", type= "discrete", nu = 0.5)
+summary(ada_basic_model)
+
+```
+## Predict on train data
+## Build Confusion Matrix 
+## Check F1 score and Accuracy of train data
+## Accuracy-->85.4
+## F1 Score-->91.5
+```{r}
+pred_train  =  predict(ada_basic_model, train_data[, 1:14])  
+confusionMatrix(pred_train,train_data$FlightDelayStatus)
+F1_Score(y_true =train_data$FlightDelayStatus,y_pred = pred_train)
+Accuracy(y_true =train_data$FlightDelayStatus,y_pred = pred_train)
+```
+## Predict on Validation data
+## Build Confusion Matrix and Accuracy for Validation data
+```{r}
+pred_val  =  predict(ada_basic_model, validation_data[, 1:14])  
+confusionMatrix(pred_val,validation_data$FlightDelayStatus)
+```
+## F1 score on Validation data-->90.8%
+## Accuracy on Validation Data-->84.23%
+```{r}
+F1_Score(y_true =validation_data$FlightDelayStatus,y_pred = pred_val)
+Accuracy(y_true =validation_data$FlightDelayStatus,y_pred = pred_val)
+```
+## Test Data Prediction F1 Score-->16.02%
+```{r}
+pred_test <- predict(ada_basic_model, test_data)
+FlightDelayStatus<-as.character(pred_test) 
+preds_ada<-cbind(FlightNumber,FlightDelayStatus)
+write.csv(preds_ada,"submission_ada.csv",row.names = F)
+```
